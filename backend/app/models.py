@@ -2,7 +2,7 @@ from sqlalchemy import Column, Integer, String, Text, Boolean, ForeignKey, DateT
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from .database import Base
-
+from sqlalchemy.sql import func
 
 class User(Base):
     __tablename__ = "users"
@@ -28,3 +28,19 @@ class Resume(Base):
 
     user_id = Column(Integer, ForeignKey("users.id"))
     owner = relationship("User", back_populates="resumes")
+
+class ResumeAnalysis(Base):
+    __tablename__ = "resume_analyses"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+
+    job_role = Column(String, nullable=True)
+    job_description = Column(Text)
+
+    total_resumes = Column(Integer)
+
+    # Store entire ranking result as JSON string
+    ranked_results = Column(Text)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
