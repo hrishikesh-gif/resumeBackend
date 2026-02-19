@@ -4,9 +4,19 @@ from .database import Base
 from . import models
 from .routes import auth_routes
 from app.routes import resume_routes
+from fastapi.middleware.cors import CORSMiddleware
+
 
 
 app = FastAPI()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 
 # Create tables automatically
