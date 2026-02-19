@@ -41,6 +41,8 @@ class ResumeAnalysis(Base):
     total_resumes = Column(Integer)
 
     # Store entire ranking result as JSON string
-    ranked_results = Column(Text)
+    ranked_results = Column(Text, nullable=True)
+    
+    status = Column(String, default="processing")  # processing / completed / failed
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())

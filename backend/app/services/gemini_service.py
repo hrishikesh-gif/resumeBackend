@@ -1,35 +1,20 @@
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 import os
 import json
 from dotenv import load_dotenv
 
 load_dotenv("key.env")
 
-api_key = os.getenv("GOOGLE_API_KEY")
-genai.configure(api_key=api_key)
+client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
 
 MODEL_NAME = "gemini-2.5-flash"
 
 
 def analyze_resume_with_gemini(resume_text: str, job_description: str):
-    """
-    Minimal AI response to reduce token usage.
-    """
-
-    model = genai.GenerativeModel(MODEL_NAME)
 
     prompt = f"""
     Extract candidate information from the resume and compare with job description.
-
-    Return ONLY valid JSON in this exact format:
-
-    {{
-      "name": "",
-      "contact_number": "",
-      "email": "",
-      "match_score": 0,
-      "interview_priority": "High" | "Medium" | "Low"
-    }}
 
     Job Description:
     {job_description}
@@ -38,16 +23,34 @@ def analyze_resume_with_gemini(resume_text: str, job_description: str):
     {resume_text[:4000]}
     """
 
-    response = model.generate_content(prompt)
-
-    try:
-        clean_text = response.text.strip("```json").strip("```")
-        return json.loads(clean_text)
-    except Exception:
-        return {
-            "name": "Not Found",
-            "contact_number": "Not Found",
-            "email": "Not Found",
-            "match_score": 0,
-            "interview_priority": "Low"
+    response = client.models.generate_content(
+    model="gemini-2.5-flash",
+    contents=prompt,
+    config=types.GenerateContentConfig(
+        temperature=0.2,
+        response_mime_type="application/json",
+        response_schema={
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "contact_number": {"type": "string"},
+                "email": {"type": "string"},
+                "match_score": {"type": "number"},
+                "interview_priority": {
+                    "type": "string",
+                    "enum": ["High", "Medium", "Low"]
+                }
+            },
+            "required": [
+                "name",
+                "contact_number",
+                "email",
+                "match_score",
+                "interview_priority"
+            ]
         }
+    )
+)
+
+
+    return json.loads(response.text)

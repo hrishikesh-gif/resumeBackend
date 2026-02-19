@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException
+from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException, BackgroundTasks
 from sqlalchemy.orm import Session
 from typing import List
 from io import BytesIO
@@ -7,8 +7,7 @@ from openpyxl import Workbook
 import json
 from datetime import datetime
 
-
-from app.database import get_db
+from app.database import get_db, SessionLocal
 from app.auth import get_current_user
 from app.models import ResumeAnalysis
 from app.services.resume_parser import extract_text_from_pdf
@@ -18,11 +17,68 @@ from app.services.scoring_service import rank_resumes
 router = APIRouter(prefix="/resumes", tags=["Resume Analysis"])
 
 
-# ================================
+# ============================================================
+# 🔥 BACKGROUND FUNCTION (OUTSIDE ROUTE)
+# ============================================================
+def process_resume_analysis(
+    analysis_id: int,
+    job_description: str,
+    files_data: List[dict]
+):
+    db = SessionLocal()
+
+    try:
+        extracted_resumes = []
+
+        for file in files_data:
+            text = extract_text_from_pdf(BytesIO(file["content"]))
+             # 🔎 DEBUG BLOCK (temporary)
+            print("\n===== DEBUG: Extracted Resume Text =====")
+            print(text[:500])   # print first 500 chars only
+            print("========================================\n")
+
+            result = analyze_resume_with_gemini(text, job_description)
+
+            extracted_resumes.append({
+                "file_name": file["filename"],
+                **result
+            })
+
+        final_results = rank_resumes(extracted_resumes)
+
+        analysis = db.query(ResumeAnalysis).filter(
+            ResumeAnalysis.id == analysis_id
+        ).first()
+
+        analysis.total_resumes = len(final_results)
+        analysis.ranked_results = json.dumps(final_results)
+        analysis.status = "completed"
+
+        db.commit()
+
+    except Exception as e:
+          
+        print("\n🔥 BACKGROUND ERROR OCCURRED 🔥")
+        print(str(e))
+        print("=================================\n")
+
+        analysis = db.query(ResumeAnalysis).filter(
+            ResumeAnalysis.id == analysis_id
+        ).first()
+
+        analysis.status = "failed"
+        db.commit()
+
+    finally:
+        db.close()
+
+
+# ============================================================
 # POST /resumes/analyze
-# ================================
+# ============================================================
 @router.post("/analyze")
 async def analyze_resumes(
+    background_tasks: BackgroundTasks,
     job_description: str = Form(...),
     job_role: str = Form(""),
     files: List[UploadFile] = File(...),
@@ -32,48 +88,47 @@ async def analyze_resumes(
     if not files:
         raise HTTPException(status_code=400, detail="No resumes uploaded")
 
-    extracted_resumes = []
-
-    # 1️⃣ Extract text
-    for file in files:
-        content = await file.read()
-        text = extract_text_from_pdf(BytesIO(content))
-
-        # 2️⃣ Analyze with Gemini
-        result = analyze_resume_with_gemini(text, job_description)
-
-        extracted_resumes.append({
-            "file_name": file.filename,
-            **result
-        })
-
-    # 3️⃣ Rank results (your scoring service)
-    final_results = rank_resumes(extracted_resumes)
-
-    # 4️⃣ Save entire batch as ONE record
+    # 1️⃣ Create DB record FIRST
     analysis = ResumeAnalysis(
         user_id=current_user.id,
         job_role=job_role,
         job_description=job_description,
-        total_resumes=len(final_results),
-        ranked_results=json.dumps(final_results)
+        total_resumes=0,
+        ranked_results=None,
+        status="processing"
     )
 
     db.add(analysis)
     db.commit()
     db.refresh(analysis)
 
+    # 2️⃣ Store file content in memory for background task
+    files_data = []
+    for file in files:
+        content = await file.read()
+        files_data.append({
+            "filename": file.filename,
+            "content": content
+        })
+
+    # 3️⃣ Run background processing
+    background_tasks.add_task(
+        process_resume_analysis,
+        analysis.id,
+        job_description,
+        files_data
+    )
+
     return {
         "analysis_id": analysis.id,
-        "job_role": job_role,
-        "total_resumes": len(final_results),
-        "results": final_results
+        "status": "processing",
+        "message": "Resume analysis started in background"
     }
 
 
-# ================================
+# ============================================================
 # GET /resumes/my-analyses
-# ================================
+# ============================================================
 @router.get("/my-analyses")
 def get_my_analyses(
     db: Session = Depends(get_db),
@@ -90,15 +145,16 @@ def get_my_analyses(
             "analysis_id": a.id,
             "job_role": a.job_role,
             "total_resumes": a.total_resumes,
+            "status": a.status,
             "created_at": a.created_at
         }
         for a in analyses
     ]
 
 
-# ================================
+# ============================================================
 # GET /resumes/{analysis_id}
-# ================================
+# ============================================================
 @router.get("/{analysis_id}")
 def get_analysis_detail(
     analysis_id: int,
@@ -115,6 +171,13 @@ def get_analysis_detail(
     if not analysis:
         raise HTTPException(status_code=404, detail="Analysis not found")
 
+    if analysis.status != "completed":
+        return {
+            "analysis_id": analysis.id,
+            "status": analysis.status,
+            "message": "Analysis still processing"
+        }
+
     return {
         "analysis_id": analysis.id,
         "job_role": analysis.job_role,
@@ -123,9 +186,9 @@ def get_analysis_detail(
     }
 
 
-# ================================
-# GET /resumes/{analysis_id}/download
-# ================================
+# ============================================================
+# DOWNLOAD
+# ============================================================
 @router.get("/{analysis_id}/download")
 def download_analysis(
     analysis_id: int,
@@ -139,8 +202,8 @@ def download_analysis(
         ) \
         .first()
 
-    if not analysis:
-        raise HTTPException(status_code=404, detail="Analysis not found")
+    if not analysis or analysis.status != "completed":
+        raise HTTPException(status_code=404, detail="Analysis not ready")
 
     results = json.loads(analysis.ranked_results)
 
@@ -171,12 +234,8 @@ def download_analysis(
     wb.save(stream)
     stream.seek(0)
 
-    # ✅ Clean job role for filename
     job_role_clean = analysis.job_role.strip().replace(" ", "_")
-
-    # ✅ Add date
     today_str = datetime.now().strftime("%Y-%m-%d")
-
     file_name = f"{job_role_clean}_{today_str}.xlsx"
 
     return StreamingResponse(
