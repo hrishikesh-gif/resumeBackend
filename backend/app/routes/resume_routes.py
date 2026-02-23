@@ -10,7 +10,7 @@ from datetime import datetime
 from app.database import get_db, SessionLocal
 from app.auth import get_current_user
 from app.models import ResumeAnalysis
-from app.services.resume_parser import extract_text_from_pdf
+from app.services.resume_parser import extract_text_from_file
 from app.services.gemini_service import analyze_resume_with_gemini
 from app.services.scoring_service import rank_resumes
 
@@ -31,13 +31,14 @@ def process_resume_analysis(
         extracted_resumes = []
 
         for file in files_data:
-            text = extract_text_from_pdf(BytesIO(file["content"]))
+            text = extract_text_from_file(BytesIO(file["content"]), file["filename"])
              # 🔎 DEBUG BLOCK (temporary)
             print("\n===== DEBUG: Extracted Resume Text =====")
             print(text[:500])   # print first 500 chars only
             print("========================================\n")
 
             result = analyze_resume_with_gemini(text, job_description)
+            print("AI RESULT:", result)
 
             extracted_resumes.append({
                 "file_name": file["filename"],
@@ -180,11 +181,36 @@ def get_analysis_detail(
 
     return {
         "analysis_id": analysis.id,
+        "status": analysis.status,
         "job_role": analysis.job_role,
         "total_resumes": analysis.total_resumes,
         "results": json.loads(analysis.ranked_results)
     }
+# ============================================================
+# DELETE /resumes/{analysis_id}
+# ============================================================
+@router.delete("/{analysis_id}")
+def delete_analysis(
+    analysis_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    analysis = (
+        db.query(ResumeAnalysis)
+        .filter(
+            ResumeAnalysis.id == analysis_id,
+            ResumeAnalysis.user_id == current_user.id
+        )
+        .first()
+    )
 
+    if not analysis:
+        raise HTTPException(status_code=404, detail="Analysis not found")
+
+    db.delete(analysis)
+    db.commit()
+
+    return {"message": "Analysis deleted successfully"}
 
 # ============================================================
 # DOWNLOAD
@@ -212,22 +238,24 @@ def download_analysis(
     ws.title = "Ranked Resumes"
 
     ws.append([
-        "File Name",
         "Name",
         "Contact",
         "Email",
         "Match Score",
-        "Interview Priority"
+        "Interview Priority",
+        "Matched Skills",
+        "File Name"
     ])
 
     for r in results:
         ws.append([
-            r.get("file_name"),
             r.get("name"),
             r.get("contact_number"),
             r.get("email"),
             r.get("match_score"),
             r.get("interview_priority"),
+            ", ".join(r.get("matched_skills", [])),
+            r.get("file_name")
         ])
 
     stream = BytesIO()
