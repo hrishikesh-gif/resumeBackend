@@ -18,7 +18,7 @@ router = APIRouter(prefix="/resumes", tags=["Resume Analysis"])
 
 
 # ============================================================
-# 🔥 BACKGROUND FUNCTION (OUTSIDE ROUTE)
+# 🔥 BACKGROUND FUNCTION
 # ============================================================
 def process_resume_analysis(
     analysis_id: int,
@@ -32,13 +32,8 @@ def process_resume_analysis(
 
         for file in files_data:
             text = extract_text_from_file(BytesIO(file["content"]), file["filename"])
-             # 🔎 DEBUG BLOCK (temporary)
-            print("\n===== DEBUG: Extracted Resume Text =====")
-            print(text[:500])   # print first 500 chars only
-            print("========================================\n")
 
             result = analyze_resume_with_gemini(text, job_description)
-            print("AI RESULT:", result)
 
             extracted_resumes.append({
                 "file_name": file["filename"],
@@ -58,16 +53,25 @@ def process_resume_analysis(
         db.commit()
 
     except Exception as e:
-          
-        print("\n🔥 BACKGROUND ERROR OCCURRED 🔥")
-        print(str(e))
-        print("=================================\n")
 
         analysis = db.query(ResumeAnalysis).filter(
             ResumeAnalysis.id == analysis_id
         ).first()
 
-        analysis.status = "failed"
+        error_message = str(e).lower()
+
+        # 🔥 429 - Quota Exceeded
+        if "quota" in error_message or "rate limit" in error_message:
+            analysis.status = "quota_exceeded"
+
+        # 🔥 403 - Forbidden / Permission issue
+        elif "permission" in error_message or "forbidden" in error_message:
+            analysis.status = "forbidden"
+
+        # 🔥 500 - Generic Server Error
+        else:
+            analysis.status = "failed"
+
         db.commit()
 
     finally:
@@ -89,7 +93,6 @@ async def analyze_resumes(
     if not files:
         raise HTTPException(status_code=400, detail="No resumes uploaded")
 
-    # 1️⃣ Create DB record FIRST
     analysis = ResumeAnalysis(
         user_id=current_user.id,
         job_role=job_role,
@@ -103,7 +106,6 @@ async def analyze_resumes(
     db.commit()
     db.refresh(analysis)
 
-    # 2️⃣ Store file content in memory for background task
     files_data = []
     for file in files:
         content = await file.read()
@@ -112,7 +114,6 @@ async def analyze_resumes(
             "content": content
         })
 
-    # 3️⃣ Run background processing
     background_tasks.add_task(
         process_resume_analysis,
         analysis.id,
@@ -169,10 +170,32 @@ def get_analysis_detail(
         ) \
         .first()
 
+    # 🔥 404
     if not analysis:
         raise HTTPException(status_code=404, detail="Analysis not found")
 
-    if analysis.status != "completed":
+    # 🔥 429
+    if analysis.status == "quota_exceeded":
+        raise HTTPException(
+            status_code=429,
+            detail="API quota exceeded. Please try again later."
+        )
+
+    # 🔥 403
+    if analysis.status == "forbidden":
+        raise HTTPException(
+            status_code=403,
+            detail="Access denied. API permission issue."
+        )
+
+    # 🔥 500
+    if analysis.status == "failed":
+        raise HTTPException(
+            status_code=500,
+            detail="Server error occurred during analysis."
+        )
+
+    if analysis.status == "processing":
         return {
             "analysis_id": analysis.id,
             "status": analysis.status,
@@ -186,6 +209,8 @@ def get_analysis_detail(
         "total_resumes": analysis.total_resumes,
         "results": json.loads(analysis.ranked_results)
     }
+
+
 # ============================================================
 # DELETE /resumes/{analysis_id}
 # ============================================================
@@ -212,6 +237,7 @@ def delete_analysis(
 
     return {"message": "Analysis deleted successfully"}
 
+
 # ============================================================
 # DOWNLOAD
 # ============================================================
@@ -228,8 +254,23 @@ def download_analysis(
         ) \
         .first()
 
-    if not analysis or analysis.status != "completed":
-        raise HTTPException(status_code=404, detail="Analysis not ready")
+    # 🔥 404
+    if not analysis:
+        raise HTTPException(status_code=404, detail="Analysis not found")
+
+    # 🔥 429
+    if analysis.status == "quota_exceeded":
+        raise HTTPException(
+            status_code=429,
+            detail="Quota exceeded. Cannot download results."
+        )
+
+    # 🔥 500
+    if analysis.status != "completed":
+        raise HTTPException(
+            status_code=500,
+            detail="Analysis not ready or failed."
+        )
 
     results = json.loads(analysis.ranked_results)
 
