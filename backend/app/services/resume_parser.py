@@ -2,6 +2,8 @@ from io import BytesIO
 from PyPDF2 import PdfReader
 from docx import Document
 
+from .exceptions import ResumeParseError, UnsupportedFileTypeError
+
 
 def extract_text_from_file(file_bytes: BytesIO, filename: str):
     """
@@ -23,7 +25,7 @@ def extract_text_from_file(file_bytes: BytesIO, filename: str):
             return text.strip()
 
         except Exception as e:
-            raise Exception(f"PDF extraction failed: {str(e)}")
+            raise ResumeParseError(f"PDF extraction failed: {str(e)}") from e
 
     # ================= DOCX =================
     elif filename.endswith(".docx"):
@@ -33,14 +35,14 @@ def extract_text_from_file(file_bytes: BytesIO, filename: str):
             return text.strip()
 
         except Exception as e:
-            raise Exception(f"DOCX extraction failed: {str(e)}")
+            raise ResumeParseError(f"DOCX extraction failed: {str(e)}") from e
 
     # ================= DOC (Not Supported) =================
     elif filename.endswith(".doc"):
-        raise Exception(
+        raise UnsupportedFileTypeError(
             "Old .doc format is not supported. Please convert to .docx."
         )
 
     # ================= Unsupported =================
     else:
-        raise Exception("Unsupported file format. Upload PDF or DOCX.")
+        raise UnsupportedFileTypeError("Unsupported file format. Upload PDF or DOCX.")

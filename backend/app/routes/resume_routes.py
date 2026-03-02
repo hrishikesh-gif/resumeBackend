@@ -13,6 +13,13 @@ from app.models import ResumeAnalysis
 from app.services.resume_parser import extract_text_from_file
 from app.services.gemini_service import analyze_resume_with_gemini
 from app.services.scoring_service import rank_resumes
+from app.services.exceptions import (
+    ForbiddenError,
+    QuotaExceededError,
+    ResumeAnalysisError,
+    UnsupportedFileTypeError,
+)
+from app.config import MAX_UPLOAD_FILES, MAX_UPLOAD_FILE_SIZE_BYTES
 
 router = APIRouter(prefix="/resumes", tags=["Resume Analysis"])
 
@@ -45,6 +52,8 @@ def process_resume_analysis(
         analysis = db.query(ResumeAnalysis).filter(
             ResumeAnalysis.id == analysis_id
         ).first()
+        if not analysis:
+            return
 
         analysis.total_resumes = len(final_results)
         analysis.ranked_results = json.dumps(final_results)
@@ -57,18 +66,18 @@ def process_resume_analysis(
         analysis = db.query(ResumeAnalysis).filter(
             ResumeAnalysis.id == analysis_id
         ).first()
+        if not analysis:
+            return
 
-        error_message = str(e).lower()
-
-        # 🔥 429 - Quota Exceeded
-        if "quota" in error_message or "rate limit" in error_message:
+        if isinstance(e, QuotaExceededError):
             analysis.status = "quota_exceeded"
 
-        # 🔥 403 - Forbidden / Permission issue
-        elif "permission" in error_message or "forbidden" in error_message:
+        elif isinstance(e, ForbiddenError):
             analysis.status = "forbidden"
 
-        # 🔥 500 - Generic Server Error
+        elif isinstance(e, (ResumeAnalysisError, UnsupportedFileTypeError)):
+            analysis.status = "failed"
+
         else:
             analysis.status = "failed"
 
@@ -92,6 +101,11 @@ async def analyze_resumes(
 ):
     if not files:
         raise HTTPException(status_code=400, detail="No resumes uploaded")
+    if len(files) > MAX_UPLOAD_FILES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Too many files. Maximum allowed is {MAX_UPLOAD_FILES}.",
+        )
 
     analysis = ResumeAnalysis(
         user_id=current_user.id,
@@ -108,7 +122,17 @@ async def analyze_resumes(
 
     files_data = []
     for file in files:
+        if not file.filename.lower().endswith((".pdf", ".docx", ".doc")):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported file format for {file.filename}. Upload PDF or DOCX.",
+            )
         content = await file.read()
+        if len(content) > MAX_UPLOAD_FILE_SIZE_BYTES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"File too large: {file.filename}. Maximum size is {MAX_UPLOAD_FILE_SIZE_BYTES} bytes.",
+            )
         files_data.append({
             "filename": file.filename,
             "content": content
